@@ -1,0 +1,101 @@
+name: 股序：發布與更新
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # 台灣時間 14:35、14:50、16:10、18:10、21:10、07:10
+    - cron: '35,50 6 * * *'
+    - cron: '10 8,10,13,23 * * *'
+    # 台灣時間 02:37，每次續補最多 80 個歷史候選日
+    - cron: '37 18 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'publish=僅發布；update=更新行情並發布'
+        type: choice
+        default: publish
+        options: [publish, update]
+      history_batch:
+        description: '更新時要補建的歷史候選日數'
+        type: choice
+        default: '0'
+        options: ['0', '35', '80', '250']
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: twstock-flat-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 還原程式及初始資料
+        run: |
+          python3 -m zipfile -e SOURCE.zip .runner
+          python3 .runner/scripts/flat_data.py unpack --flat . --project .runner
+      - name: 載入持續保存的資料分支
+        id: restore
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --heads origin market-data >/dev/null 2>&1; then
+            git fetch origin market-data --depth=1
+            git worktree add --detach .market-store FETCH_HEAD
+            test -d .market-store/data && cp -a .market-store/data/. .runner/public/data/
+            test -d .market-store/data-store && cp -a .market-store/data-store/. .runner/data-store/
+          else
+            git worktree add --detach .market-store HEAD
+            git -C .market-store switch --orphan market-data
+          fi
+      - name: 驗證資料邏輯
+        run: python3 -m unittest discover -s .runner/tests -p 'test_*.py'
+      - name: 更新官方行情與續補歷史
+        id: collect
+        if: github.event_name == 'schedule' || inputs.mode == 'update'
+        env:
+          MANUAL_BATCH: ${{ inputs.history_batch }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        shell: bash
+        run: |
+          batch="${MANUAL_BATCH:-0}"
+          if [ "$EVENT_SCHEDULE" = '37 18 * * *' ]; then batch=80; fi
+          python3 -u .runner/scripts/update_data.py --batch-days "$batch" --history-years 5 --delay 1.5
+      - name: 保存行情與續傳進度
+        if: always() && steps.restore.outcome == 'success' && steps.collect.outcome != 'skipped'
+        shell: bash
+        run: |
+          mkdir -p .market-store/data .market-store/data-store
+          cp -a .runner/public/data/. .market-store/data/
+          cp -a .runner/data-store/. .market-store/data-store/
+          git -C .market-store config user.name 'github-actions[bot]'
+          git -C .market-store config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C .market-store add data data-store
+          if ! git -C .market-store diff --cached --quiet; then
+            git -C .market-store commit -m 'Update verified market data and history progress'
+            git -C .market-store push origin HEAD:refs/heads/market-data
+          fi
+      - name: 整理扁平網站
+        run: python3 .runner/scripts/flat_data.py stage --flat . --project .runner --output .pages
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .pages
+      - name: 發布網站
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: 資料狀態摘要
+        if: always() && steps.restore.outcome == 'success'
+        run: python3 .runner/scripts/job_summary.py

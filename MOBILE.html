@@ -1,0 +1,102 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>股序｜手機設定工作流程</title><style>body{max-width:800px;margin:32px auto;padding:0 18px;background:#f4f5f1;color:#233c31;font:16px/1.8 system-ui}button{font:inherit;background:#274e3d;color:white;border:0;border-radius:8px;padding:14px;cursor:pointer}textarea{box-sizing:border-box;width:100%;height:56vh;font:12px/1.5 monospace;margin-top:20px;padding:14px;border:1px solid #aab9ae;border-radius:8px}code{overflow-wrap:anywhere}a{color:#285e45}#status{min-height:28px}</style><h1>手機設定每日更新</h1><p>先複製下方完整內容，再到 GitHub 的 Code → Add file → Create new file。</p><p>檔名：<code>.github/workflows/update-data.yml</code></p><p>Pages Source 必須改成 GitHub Actions。完整步驟與 Google Drive 設定請見 <a href="SETUP.html">設定說明</a>。</p><button id="copy">複製完整工作流程</button><p id="status" role="status"></p><textarea id="yaml" readonly aria-label="完整 GitHub 工作流程">name: 股序：發布與更新
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # 台灣時間 14:35、14:50、16:10、18:10、21:10、07:10
+    - cron: &#x27;35,50 6 * * *&#x27;
+    - cron: &#x27;10 8,10,13,23 * * *&#x27;
+    # 台灣時間 02:37，每次續補最多 80 個歷史候選日
+    - cron: &#x27;37 18 * * *&#x27;
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: &#x27;publish=僅發布；update=更新行情並發布&#x27;
+        type: choice
+        default: publish
+        options: [publish, update]
+      history_batch:
+        description: &#x27;更新時要補建的歷史候選日數&#x27;
+        type: choice
+        default: &#x27;0&#x27;
+        options: [&#x27;0&#x27;, &#x27;35&#x27;, &#x27;80&#x27;, &#x27;250&#x27;]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: twstock-flat-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: &#x27;3.12&#x27;
+      - name: 還原程式及初始資料
+        run: |
+          python3 -m zipfile -e SOURCE.zip .runner
+          python3 .runner/scripts/flat_data.py unpack --flat . --project .runner
+      - name: 載入持續保存的資料分支
+        id: restore
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --heads origin market-data &gt;/dev/null 2&gt;&amp;1; then
+            git fetch origin market-data --depth=1
+            git worktree add --detach .market-store FETCH_HEAD
+            test -d .market-store/data &amp;&amp; cp -a .market-store/data/. .runner/public/data/
+            test -d .market-store/data-store &amp;&amp; cp -a .market-store/data-store/. .runner/data-store/
+          else
+            git worktree add --detach .market-store HEAD
+            git -C .market-store switch --orphan market-data
+          fi
+      - name: 驗證資料邏輯
+        run: python3 -m unittest discover -s .runner/tests -p &#x27;test_*.py&#x27;
+      - name: 更新官方行情與續補歷史
+        id: collect
+        if: github.event_name == &#x27;schedule&#x27; || inputs.mode == &#x27;update&#x27;
+        env:
+          MANUAL_BATCH: ${{ inputs.history_batch }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        shell: bash
+        run: |
+          batch=&quot;${MANUAL_BATCH:-0}&quot;
+          if [ &quot;$EVENT_SCHEDULE&quot; = &#x27;37 18 * * *&#x27; ]; then batch=80; fi
+          python3 -u .runner/scripts/update_data.py --batch-days &quot;$batch&quot; --history-years 5 --delay 1.5
+      - name: 保存行情與續傳進度
+        if: always() &amp;&amp; steps.restore.outcome == &#x27;success&#x27; &amp;&amp; steps.collect.outcome != &#x27;skipped&#x27;
+        shell: bash
+        run: |
+          mkdir -p .market-store/data .market-store/data-store
+          cp -a .runner/public/data/. .market-store/data/
+          cp -a .runner/data-store/. .market-store/data-store/
+          git -C .market-store config user.name &#x27;github-actions[bot]&#x27;
+          git -C .market-store config user.email &#x27;41898282+github-actions[bot]@users.noreply.github.com&#x27;
+          git -C .market-store add data data-store
+          if ! git -C .market-store diff --cached --quiet; then
+            git -C .market-store commit -m &#x27;Update verified market data and history progress&#x27;
+            git -C .market-store push origin HEAD:refs/heads/market-data
+          fi
+      - name: 整理扁平網站
+        run: python3 .runner/scripts/flat_data.py stage --flat . --project .runner --output .pages
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .pages
+      - name: 發布網站
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: 資料狀態摘要
+        if: always() &amp;&amp; steps.restore.outcome == &#x27;success&#x27;
+        run: python3 .runner/scripts/job_summary.py
+</textarea><script>document.getElementById('copy').onclick=async()=>{const t=document.getElementById('yaml'),s=document.getElementById('status');try{if(!navigator.clipboard)throw new Error();await navigator.clipboard.writeText(t.value);s.textContent='已複製。請到 GitHub 建立指定路徑的檔案並貼上。'}catch{t.focus();t.select();t.setSelectionRange(0,t.value.length);s.textContent='已選取全文；請使用手機的「複製」功能。'}};</script></html>

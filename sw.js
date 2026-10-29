@@ -1,0 +1,7 @@
+const PREFIX='twstock-shell-'+encodeURIComponent(self.registration.scope)+'-';const CACHE=PREFIX+'5d82d96daf82f4';const FILES=["Chart-DwFNbP-d.js","PRIVACY.html","SETUP.html","icon-192.png","icon-512.png","icon.svg","index-CPgqfp8B.js","index-DztTuJjC.css","index.html","manifest.webmanifest"];
+self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES.map(f=>new URL(f,self.registration.scope).href)))));
+self.addEventListener('activate',e=>e.waitUntil((async()=>{for(const k of await caches.keys())if(k.startsWith(PREFIX)&&k!==CACHE)await caches.delete(k);await self.clients.claim()})()));
+self.addEventListener('message',e=>{if(e.data?.type==='SKIP_WAITING')self.skipWaiting()});
+self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(e.request.method!=='GET'||u.origin!==location.origin||u.pathname.includes('/data/')||/\/(market|history-\d{2})\.json$/.test(u.pathname)||u.pathname.endsWith('version.json')||u.pathname.endsWith('sw.js'))return;
+if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(async()=>(await caches.match(e.request))||caches.match(new URL('index.html',self.registration.scope).href)));return}
+e.respondWith(caches.open(CACHE).then(async c=>(await c.match(e.request))||fetch(e.request)));});
